@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Workflow Trace Viewer</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    .controls {
+      display: flex;
+      flex-direction: row;
+      gap: 10px;
+      padding: 10px;
+      background-color: #f4f4f4;
+      border-bottom: 1px solid #ccc;
+      position: relative;
+      z-index: 10;
+    }
+    .controls input,
+    .controls button {
+      padding: 5px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background-color: #fff;
+      cursor: pointer;
+    }
+    .canvas-container {
+      position: relative;
+      width: 100%;
+      height: calc(100vh - 60px); /* Full height minus controls */
+      background-color: #eaeaea;
+      overflow: hidden;
+    }
+    .workspace-container {
+      position: absolute;
+      top: 50%; /* Center vertically */
+      left: 20px; /* Align to the left with a reasonable indentation */
+      transform: translateY(-50%); /* Only vertically center */
+      width: 2600px; /* Large enough to hold the workflow */
+      height: 1400px; /* Large enough to hold the workflow */
+      background-color: #fff;
+      border: 1px solid #ccc;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      background-image: radial-gradient(circle, red 1px, transparent 1px);
+      background-size: 20px 20px; /* Size of each grid cell */
+    }
+    .tooltip {
+      position: absolute;
+      padding: 6px 10px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      border-radius: 5px;
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+      max-width: 300px;
+      white-space: normal;
+      word-wrap: break-word;
+    }
+    .highlight {
+      font-weight: bold;
+      fill: red !important;
+    }
+    .node {
+      fill: #4CAF50;
+      stroke: #000;
+      stroke-width: 2px;
+    }
+    .link {
+      stroke: #4CAF50;
+      fill: none;
+    }
+    .label {
+      font-size: 10px;
+      fill: #333;
+      text-anchor: middle;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <input type="text" id="searchBar" placeholder="Search tasks..." />
+    <button id="exportButton">Export SVG</button>
+  </div>
+  <div class="canvas-container">
+    <div class="workspace-container">
+      <svg width="2600" height="1400"></svg>
+    </div>
+  </div>
+  <div class="tooltip" id="tooltip"></div>
+  <script>
+    fetch("/api/tasks")
+      .then(res => res.json())
+      .then(groups => {
+        const svg = d3.select("svg");
+        const margin = { top: 100, left: 150 };
+        const spacingX = 280;
+        const spacingY = 28;
+        const radius = 16;
+
+        const tooltip = d3.select("#tooltip");
+        const basePositions = {};
+
+        // Add zoom and pan functionality
+        const zoom = d3.zoom()
+          .scaleExtent([0.5, 5])
+          .on("zoom", (event) => {
+            svgGroup.attr("transform", event.transform);
+          });
+
+        const svgGroup = svg.append("g");
+        svg.call(zoom);
+
+        // Dynamically adjust SVG height based on the number of groups
+        const dynamicHeight = Math.max(1200, groups.length * spacingY + 200);
+        svg.attr("height", dynamicHeight);
+
+        groups.forEach((group, groupIdx) => {
+          const x = margin.left + groupIdx * spacingX;
+          const y = svg.attr("height") / 2;
+          basePositions[group.baseName] = { x, y };
+
+          svgGroup.append("circle")
+            .attr("cx", x)
+            .attr("cy", y)
+            .attr("r", radius)
+            .attr("class", "node");
+        });
+
+        const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, 100]);
+
+        function isParallelTask(name) {
+          return /\(\d+\)$/.test(name);
+        }
+
+        function shorten(text, max = 34) {
+          return text.length <= max ? text : text.slice(0, 17) + '...' + text.slice(-10);
+        }
+
+        for (let i = 0; i < groups.length - 1; i++) {
+          const fromBase = groups[i].baseName;
+          const toBase = groups[i + 1].baseName;
+          const fromPos = basePositions[fromBase];
+          const toPos = basePositions[toBase];
+
+          const fromTasks = groups[i].tasks;
+          const toTasks = groups[i + 1].tasks;
+
+          const pairs = [];
+
+          if (fromTasks.length === 1 && toTasks.length > 1) {
+            if (isParallelTask(fromTasks[0].name)) {
+              toTasks.forEach(to => pairs.push({ from: fromTasks[0], to }));
+            } else {
+              pairs.push({ from: fromTasks[0], to: toTasks[0] });
+            }
+          } else if (toTasks.length === 1 && fromTasks.length > 1) {
+            fromTasks.forEach(from => {
+              if (isParallelTask(from.name)) {
+                pairs.push({ from, to: toTasks[0] });
+              } else if (pairs.length === 0) {
+                pairs.push({ from, to: toTasks[0] });
+              }
+            });
+          } else if (fromTasks.length === 1 && toTasks.length === 1) {
+            pairs.push({ from: fromTasks[0], to: toTasks[0] });
+          } else {
+            const maxCount = Math.max(fromTasks.length, toTasks.length);
+            for (let j = 0; j < maxCount; j++) {
+              const from = fromTasks[j % fromTasks.length];
+              const to = toTasks[j % toTasks.length];
+              if (isParallelTask(from.name)) {
+                pairs.push({ from, to });
+              } else if (j === 0) {
+                pairs.push({ from, to });
+              }
+            }
+          }
+
+          for (let j = 0; j < pairs.length; j++) {
+            const pair = pairs[j];
+
+            const offset = (j - (pairs.length - 1) / 2) * spacingY;
+            const fromY = fromPos.y;
+            const toY = toPos.y;
+            const fromX = fromPos.x + radius;
+            const toX = toPos.x - radius;
+
+            const task = pair.from;
+            const taskName = task?.name || "";
+            const duration = task?.duration || "N/A";
+            const memory = task?.memory || "N/A";
+            const cpu = task?.cpu || "N/A";
+
+            const bendIn = fromX + 30;
+            const bendOut = toX - 30;
+            const yOffset = offset;
+
+            const path = d3.path();
+            path.moveTo(fromX, fromY);
+            path.bezierCurveTo(
+              fromX + 10, fromY,
+              bendIn - 10, fromY + yOffset,
+              bendIn, fromY + yOffset
+            );
+            path.lineTo(bendOut, toY + yOffset);
+            path.bezierCurveTo(
+              bendOut + 10, toY + yOffset,
+              toX - 10, toY,
+              toX, toY
+            );
+
+            svgGroup.append("path")
+              .attr("class", "link")
+              .attr("d", path)
+              .attr("stroke", colorScale(+cpu || 0))
+              .attr("stroke-width", Math.max(2, Math.min(8, +cpu / 25)))
+              .on("mouseover", function (event) {
+                tooltip.style("opacity", 1)
+                  .html(
+                    `<strong>${taskName}</strong><br>` +
+                    `Duration: ${duration}<br>` +
+                    `Memory: ${memory}<br>` +
+                    `CPU: ${cpu}`
+                  )
+                  .style("left", `${event.pageX + 10}px`)
+                  .style("top", `${event.pageY - 30}px`);
+                d3.select(this).attr("stroke-width", 6);
+              })
+              .on("mousemove", function (event) {
+                tooltip.style("left", `${event.pageX + 10}px`)
+                  .style("top", `${event.pageY - 30}px`);
+              })
+              .on("mouseout", function () {
+                tooltip.style("opacity", 0);
+                d3.select(this).attr("stroke-width", Math.max(2, Math.min(8, +cpu / 25)));
+              });
+
+            const labelX = (fromX + toX) / 2;
+            const labelY = fromY + offset - 8;
+
+            svgGroup.append("text")
+              .attr("class", "label")
+              .attr("x", labelX)
+              .attr("y", labelY)
+              .text(shorten(taskName));
+          }
+        }
+
+        // Search functionality
+        d3.select("#searchBar").on("input", function () {
+          const query = this.value.toLowerCase();
+          svg.selectAll(".label").classed("highlight", false);
+
+          if (query) {
+            svg.selectAll(".label")
+              .filter(function () {
+                return d3.select(this).text().toLowerCase().includes(query);
+              })
+              .classed("highlight", true);
+          }
+        });
+
+        // Export SVG functionality
+        d3.select("#exportButton").on("click", function () {
+          const svg = d3.select("svg");
+
+          // Inline the styles
+          inlineStyles(svg);
+
+          // Serialize the SVG
+          const svgContent = new XMLSerializer().serializeToString(svg.node());
+          const blob = new Blob([svgContent], { type: "image/svg+xml;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+
+          // Create a download link
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "workflow-trace-viewer.svg";
+          link.click();
+
+          URL.revokeObjectURL(url);
+        });
+      });
+
+    function inlineStyles(svg) {
+      const styleSheets = Array.from(document.styleSheets);
+      const cssRules = [];
+
+      // Collect all CSS rules
+      styleSheets.forEach((sheet) => {
+        try {
+          Array.from(sheet.cssRules).forEach((rule) => {
+            cssRules.push(rule.cssText);
+          });
+        } catch (e) {
+          console.warn("Could not access stylesheet:", sheet.href);
+        }
+      });
+
+      // Create a <style> element with all collected CSS rules
+      const styleElement = document.createElement("style");
+      styleElement.textContent = cssRules.join("\n");
+
+      // Append the <style> element to the SVG
+      const svgNode = svg.node();
+      svgNode.insertBefore(styleElement, svgNode.firstChild);
+    }
+  </script>
+</body>
+</html>
+
